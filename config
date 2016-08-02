@@ -9,11 +9,10 @@ function init(file)
 			f.close()
 			local c = textutils.unserialize(data)
 			if c then config = c else config = {} end
-			current_file = file
 		else
 			config = {}
-			current_file = file
 		end
+		current_file = file
 	else
 		config = {}
 		current_file = nil

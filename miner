@@ -7,9 +7,37 @@ assert(config, "This api requires the 'config' api")
 local blacklist = config.get("block_blacklist")
 
 -- list of liquids that can be used as fuel
-local liquidfuels = {
-	lava = {name="minecraft:flowing_lava",damage=0}
-}
+local liquidfuels = config.get("liquidfuels")
+
+local forwardFail
+
+-- Forward, Down, Up TODO: FIX THESE
+go.setFailFunctions(
+	function()
+		local _, data = turtle.inspect()
+		data = b2i(data)
+		while turtle.attack() do end
+		while turtle.suck(64) do end
+		if canFit(data) then turtle.dig() else return false, "inventory full" end
+		return true
+	end,
+	function()
+		local _, data = turtle.inspectDown()
+		data = b2i(data)
+		while turtle.attackDown() do end
+		while turtle.suckDown(64) do end
+		if canFit(data) then turtle.digDown() else return false, "inventory full" end
+		return true
+	end,
+	function()
+		local _, data = turtle.inspectUp()
+		data = b2i(data)
+		while turtle.attackUp() do end
+		while turtle.suckUp(64) do end
+		if canFit(data) then turtle.digUp() else return false, "inventory full" end
+		return true
+	end
+)
 
 -- converts block-structured data to item-structured data
 function b2i(data)
@@ -87,11 +115,31 @@ function refuel(target)
 				turtle.refuel(1)
 			end
 		end
-		if turtle.getFuelLevel() > target then
+		if turtle.getFuelLevel() >= target then
 			break
 		end
 	end
 	return turtle.getFuelLevel()
+end
+
+function dropoff(emptyEverything)
+	local i = 1
+	while i <= 16 do
+		if turtle.getItemCount(i) > 0 then
+			local detal = turtle.getItemDetail(i)
+			local lavarefuel = config.get("lavarefuel", false)
+			if emptyEverything or not lavarefuel or (lavarefuel and detail.name == "minecraft:bucket") then
+				turtle.select(i)
+				-- put fuel in fuel chest if possible
+				if turtle.refuel(0) then -- check if item is valid fuel
+					if not turtle.dropUp(64) then turtle.drop(64) end
+				else
+					turtle.drop(64)
+				end
+			end
+		end
+		i = i + 1
+	end 
 end
 
 function tossJunk(direction)
@@ -111,6 +159,7 @@ function tossJunk(direction)
 end
 
 function findBucket()
+	if not config.get("lavarefuel") then return false end
 	for i = 1, 16 do
 		local data = turtle.getItemDetail(i)
 		if data and data.name == "minecraft:bucket" then
@@ -124,38 +173,68 @@ end
 function mineSides()
 	turtle.select(1)
 	for i = 1, 4 do
-		local _, data = turtle.inspect()
-		data = b2i(data)
-		while turtle.suck(64) do end
-		if not isJunk(data) then
-			if canFit(data) then
-				turtle.dig()
+		local success, data = turtle.inspect()
+		if success then
+			data = b2i(data)
+			while turtle.suck(64) do end
+			if not isJunk(data) then
+				if canFit(data) then
+					turtle.dig()
+				else
+					return false, "inventory full"
+				end
 			end
-		end
-		if isLiquidFuel(data) then
-			if findBucket() then turtle.place() turtle.refuel(1) end
+			if isLiquidFuel(data) then
+				if findBucket() then turtle.place() turtle.refuel(1) end
+			end
 		end
 		go.right()
 	end
+	return true
 end
 
 function mineShaft()
-	--local startPos = go.getPos()
-	local descended = 0
 	while true do
-		mineSides()
-		local _, data = turtle.inspectDown()
-		data = b2i(data)
-		if data then
-			if isLiquidFuel(data) then
-				if findBucket() then turtle.placeDown() turtle.refuel(1) end
-			else
-				if not turtle.digDown() then break end
+		local success, err = mineSides()
+		if not success then
+			return false, err
+		end
+		if freeSlots() < 2 then
+			miner.tossJunk("down")
+			if freeSlots() < 2 then
+				return false, "inventory full"
 			end
 		end
-		while turtle.attackDown() do end
+		local blockExists, data = turtle.inspectDown()
+		if blockExists then
+			data = b2i(data)
+			if data then
+				if isLiquidFuel(data) then
+					if findBucket() then turtle.placeDown() turtle.refuel(1) end
+				elseif isJunk(data) then
+					if not turtle.digDown() then break end
+				else
+					if canFit(data) then
+						if not turtle.digDown() then break end
+					else
+						return false, "inventory full"
+					end
+				end
+			end
+			while turtle.attackDown() do end
+		end
 		if not go.down() then break end
-		descended = descended + 1
 	end
-	return descended
+	go.goto(nil, -1, nil)
+	return true
+end
+
+function freeSlots()
+	local freeslots = 0
+	for i = 1, 16 do
+		if turtle.getItemCount(i) == 0 then
+			freeslots = freeslots + 1
+		end
+	end
+	return freeslots
 end

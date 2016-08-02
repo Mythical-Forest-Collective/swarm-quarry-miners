@@ -54,15 +54,10 @@ function loadPos()
 		f.close()
 		if (temppos.x and temppos.y and temppos.z and temppos.f) then
 			pos.x, pos.y, pos.z, pos.f = temppos.x, temppos.y, temppos.z, temppos.f
-		else
-			pos.x = 0
-			pos.y = 64
-			pos.z = 0
-			pos.f = 0
 		end
 	else
 		pos.x = 0
-		pos.y = 64
+		pos.y = 0
 		pos.z = 0
 		pos.f = 0
 	end
@@ -75,19 +70,18 @@ function getPos()
 end
 
 function setPos(x,y,z,f)
+	if type(x) == "table" then
+		y = x.y
+		z = x.z
+		f = x.f
+		x = x.x
+	end
 	assert(x and y and z and f,"expected number, number, number, number")
 	pos.x = x
 	pos.y = y
 	pos.z = z
 	pos.f = f
 	savePos()
-end
-
-function adjustCoords(tbl, change, f)
-	assert(tbl.x and tbl.y and tbl.z, "missing coordinate(s)")
-	tbl.x = tbl.x + (df[f].dx * change)
-	tbl.z = tbl.z + (df[f].dz * change)
-	return tbl
 end
 
 local turtle = {}
@@ -102,7 +96,13 @@ function fuelTo(x, y, z, fromPos)
 		f = x.f
 		x = x.x
 	end
+	x = x or pos.x
+	y = y or pos.y
+	z = z or pos.z
 	local p = fromPos or pos
+	p.x = p.x or pos.x
+	p.y = p.y or pos.y
+	p.z = p.z or pos.z
 	local needed = math.abs(p.x - x) + math.abs(p.y - y) + math.abs(p.z - z)
 	return needed
 end
@@ -125,10 +125,6 @@ function canReach(x, y, z)
 		return false, fuelNeeded
 	end
 	return true, fuelNeeded
-end
-
-function pE(p1, p2)
-	return p1.x == p2.x and p1.y == p2.y and p1.z == p2.z
 end
 
 --[[ Basic Movement Functions ]]
@@ -217,40 +213,38 @@ end
 
 --[[ Advanced Movement Functions ]]
 
-function rotateTo(f)
-	if f > 3 or f < 0 then
-		return false, "invalid facing"
+function rotateTo(gotoFace)
+	if gotoFace > 3 or gotoFace < 0 then
+		gotoFace = gotoFace % 4
 	end
 	if not pos.f then
 		return false, "cannot determine facing"
 	end
-	local function simulateRotateTo(startf, endf)
-		local right, left = 0, 0
-		local f = startf
-		while f ~= endf do
-			right = right + 1
-			f = f + 1
-			if f > 3 then f = 0 end
-		end
-		f = startf
-		while f ~= endf do
-			left = left + 1
-			f = f - 1
-			if f < 0 then f = 3 end
-		end
-		return right, left
-	end
-	local r,l = simulateRotateTo(pos.f, f)
-	if r <= l then
-		for i = 1, r do
-			right()
-		end
+	if (gotoFace == pos.f) then return true end
+	local distance = math.abs(pos.f - gotoFace)
+	local lessThan = pos.f < gotoFace
+	local rotateFunc
+	if (lessThan and distance > 2) or (not lessThan and distance < 2) then
+		rotateFunc = left
 	else
-		for i = 1, l do
-			left()
+		rotateFunc = right
+	end
+	distance = ((distance == 3) and 1) or distance
+	for i = 1, distance do
+		local success, err = rotateFunc()
+		if not success then
+			return false, err
 		end
 	end
 	return true
+end
+
+local forwardFail, downFail, upFail
+
+function setFailFunctions(f, d, u)
+	forwardFail = f
+	downFail = d
+	upFail = u
 end
 
 function goto(x, y, z, f)
@@ -263,10 +257,6 @@ function goto(x, y, z, f)
 	-- Validation and inital setup
 	if f and (f < 0 or f > 3) then
 		return false, "invalid facing"
-	end
-	if not (pos.x and pos.y and pos.z and pos.f) then
-		local success, err = updatePos()
-		if not success then return false, err end
 	end
 	local start = {}
 	start.x, start.y, start.z, start.f = pos.x, pos.y, pos.z, pos.f
@@ -299,65 +289,97 @@ function goto(x, y, z, f)
 			end
 			return
 		end
+		local i = 0
+		local distance = math.abs(start.y - dest.y)
 		-- Move to specified coordinates
 		-- Y up
 		if start.y < dest.y then
-			for i = 1, math.abs(start.y - dest.y) do
-				while not up() do
-					while peripheral.getType("top") == "turtle" do sleep(1) end
-					turtle.digUp()
-					turtle.attackUp()
+			while i < distance do
+				local success = up()
+				if not success then 
+					if upFail then
+						success, err = upFail()
+						if not success or err then
+							return false, err
+						end
+						i = i - 1
+					else
+						return false, "failed to move up"
+					end
 				end
+				i = i + 1
 			end
-		end
-		-- Y down
-		if start.y > dest.y then
-			for i = 1, math.abs(start.y - dest.y) do
-				while not down() do
-					while peripheral.getType("bottom") == "turtle" do sleep(1) end
-					turtle.digDown()
-					turtle.attackDown()
+		elseif start.y > dest.y then -- Y down
+			while i < distance do
+				local success = down()
+				if not success then
+					if downFail then
+						success, err = downFail()
+						if not success or err then
+							return false, err
+						end
+						i = i - 1
+					else
+						return false, "failed to move down"
+					end
 				end
+				i = i + 1
 			end
 		end
 		-- X
+		i = 0
+		distance = math.abs(start.x - dest.x)
 		if facingForCoordChange("x", dest.x - start.x) then
 			rotateTo(facingForCoordChange("x", dest.x - start.x))
 		end
-		for i = 1, math.abs(start.x - dest.x) do
-			while not forward() do
-				--while peripheral.getType("front") == "turtle" do sleep(1) end
-				turtle.dig()
-				turtle.attack()
+		while i < distance do
+			local success = forward()
+			if not success then
+				if forwardFail then
+					success, err = forwardFail()
+					if not success or err then
+						return false, err
+					end
+					i = i - 1
+				else
+					return false, "failed to move forward"
+				end
 			end
+			i = i + 1
 		end
 		-- Z
+		i = 0
+		distance = math.abs(start.z - dest.z)
 		if facingForCoordChange("z", dest.z - start.z) then
 			rotateTo(facingForCoordChange("z", dest.z - start.z))
 		end
-		for i = 1, math.abs(start.z - dest.z) do
-			while not forward() do
-				--while peripheral.getType("front") == "turtle" do sleep(1) end
-				turtle.dig()
-				turtle.attack()
+		while i < distance do
+			local success = forward()
+			if not success then
+				if forwardFail then
+					success, err = forwardFail()
+					if not success or err then
+						return false, err
+					end
+					i = i - 1
+				else
+					return false, "failed to move forward"
+				end
 			end
+			i = i + 1
 		end
 		-- Rotate
 		rotateTo(dest.f)
-		-- Attempt to validate position
-		local final = {}
-		final.x, final.y, final.z = gps.locate(0.1)
-		if final.x and final.y and final.z and validatePos then
-			if final.x == dest.x and final.y == dest.y and final.z == dest.z then
-				return true
-			else
-				return false, "final position does not match"
-			end
-		else
-			-- Assume we are in the right spot
+
+		-- Validation
+		if pos.x == dest.x and 
+		   pos.y == dest.y and 
+		   pos.z == dest.z and 
+		   pos.f == dest.f then 
 			return true
+		else
+			return false, "position did not match expected destination"
 		end
-	else
-		return canReach(dest.x, dest.y, dest.z)
 	end
+	return false, "cannot reach position"
 end

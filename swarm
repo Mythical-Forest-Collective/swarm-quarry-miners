@@ -62,22 +62,50 @@ else
 	error("Failed to load APIs!")
 end
 
-if config.get("autoname",true) then
+if config.get("autoname", true) then
 	-- set turtle label automatically to prevent fuel loss on break
 	if not os.getComputerLabel() then
-		local lbl = "turtle_"..os.getComputerID()
-		os.setComputerLabel(lbl)
-		print("Computer label set to "..lbl)
+		local label = "turtle_"..os.getComputerID()
+		os.setComputerLabel(label)
+		print("Computer label set to "..label)
 	end
 end
 
-function getShaft(host, swarmName, authtoken)
-	local request = ""
-	if authtoken then
-		request = host .. "/swarm/" .. swarmName .."/claimshaft/?token=" .. authtoken .. "&id=" .. os.getComputerID()
-	else
-		request = host .. "/swarm/" .. swarmName .."/claimshaft/?id=" .. os.getComputerID()
+local enableDebug = false
+
+local function debug(str)
+	if enableDebug then
+		print(str)
 	end
+end
+
+function addToken(request)
+	local authtoken = config.get("authtoken")
+	if authtoken then
+		return request .. "&token=" .. authtoken
+	else
+		return request
+	end
+end
+
+function getShaft()
+	local request = addToken(config.get("host") .. "/swarm/" .. config.get("swarmname") .."/claimshaft/?id=" .. os.getComputerID())
+	local data = http.get(request)
+	if data then
+		local t = json.decode(data.readAll())
+		if t.success then 
+			t.success.z = t.success.z + config.get("shaft_z_offset", 2)
+			return t.success
+		else
+			return false, t.error
+		end
+	else
+		return false, "no response"
+	end
+end
+
+function markFinished(shaft)
+	local request = addToken(config.get("host") .. "/swarm/" .. config.get("swarmname") .."/finishedshaft/?x=" .. shaft.x .. "&z=" .. shaft.z)
 	local data = http.get(request)
 	if data then
 		local t = json.decode(data.readAll())
@@ -89,17 +117,19 @@ function getShaft(host, swarmName, authtoken)
 	end
 end
 
-function markFinished(shaft, host, swarmName, authtoken)
-	local request = ""
-	if authtoken then
-		request = host .. "/swarm/" .. swarmName .."/finishedshaft/?token=" .. authtoken .. "&x=" .. shaft.x .. "&z=" .. shaft.z
-	else
-		request = host .. "/swarm/" .. swarmName .."/finishedshaft/?x=" .. shaft.x .. "&z=" .. shaft.z
+function sendTravelPosition(x, y, z)
+	if type(x) == "table" then
+		y = x.y
+		z = x.z
+		x = x.x
 	end
+	local cPos = go.getPos() -- current position
+	local request = addToken(config.get("host") .. "/swarm/" .. config.get("swarmname") .."/travel/?id=" .. os.getComputerID() .. "&destX=" .. x .. "&destY=" .. y .. "&destZ=" .. z .. "&startX=" .. cPos.x .. "&startY=" .. cPos.y .. "&startZ=" .. cPos.z)
 	local data = http.get(request)
 	if data then
 		local t = json.decode(data.readAll())
 		if t.success then return t.success else
+			config.set("travelSent", true)
 			return false, t.error
 		end
 	else
@@ -107,18 +137,230 @@ function markFinished(shaft, host, swarmName, authtoken)
 	end
 end
 
-local function dropoff(all)
-	for i = 1, 16 do
-		if turtle.getItemDetail(i) and (turtle.getItemDetail(i).name ~= "minecraft:bucket" or all) then
-			turtle.select(i)
-			-- put fuel in fuel chest if possible
-			if turtle.refuel(0) then
-				if not turtle.dropUp(64) then turtle.drop(64) end
-			else
-				turtle.drop(64)
+function travelDone(force)
+	if force or not config.get("travelSent", false) then return end
+	debug("Removing from travel queue...")
+	local function sendRequest()
+		local request = addToken(config.get("host") .. "/swarm/" .. config.get("swarmname") .."/traveldone/?id=" .. os.getComputerID())
+		local data = http.get(request)
+		if data then
+			local t = json.decode(data.readAll())
+			if t.success then return t.success else
+				config.set("travelSent", false)
+				return false, t.error
+			end
+		else
+			return false, "no response"
+		end
+	end
+	while not sendRequest() do 
+		print("No response from server! Waiting..")
+		sleep(30)
+	end
+end
+
+local function travel(x, y, z, f)
+	if x == nil then
+		x = config.get("travelPosition")
+		if not x then
+			print("No travel position found! Resetting...")
+			travelDone()
+			config.set("state", "prep")
+			return false
+		end
+	end
+	if type(x) == "table" then
+		y = x.y
+		z = x.z
+		f = x.f
+		x = x.x -- Must be last
+	end
+	local cPos = go.getPos()
+	x = x or cPos.x
+	y = y or cPos.y
+	z = z or cPos.z
+	f = f or cPos.f
+	if (cPos.x == x and cPos.y == y and cPos.z == z and cPos.f == f) then return true end
+	config.set("travelPosition", { x = x, y = y, z = z, f = f })
+	config.set("state", "traveling")
+	local ready
+	local sleepTime = config.get("travelSleepTime", 3)
+	while not ready do
+		ready, err = sendTravelPosition(x, y, z)
+		if ready then
+			debug("Travel permission acquired from server!")
+			break;
+		end
+		if err == "no response" then
+			print("No response from server! Increasing sleep time")
+			sleepTime = 30
+		end
+		print(err)
+		print("Not ready to travel, waiting...")
+		sleep(sleepTime)
+	end
+	local success, err = go.goto(x, y, z, f)
+	if not success then
+		print("Error traveling!!")
+	end
+	return success, err
+end
+
+-- returns whether the turtle needs fuel and how much needed in total
+local function needFuel()
+	local shaft = config.get("shaft")
+	if not shaft then return false end
+	-- check if turtle has enough fuel
+	local needed = config.get("fuelspare", 25)
+	needed = needed + go.fuelTo(shaft.x, nil, shaft.z)
+	needed = needed + 70 * 2 -- for actual mining - assume 70 depth TODO: Calculate depth
+	needed = needed + go.fuelTo(config.get("dropoff"), { x = shaft.x, nil, z = shaft.z})
+	return miner.refuel(needed) < needed, needed
+end
+
+-- Get fuel and empty inventory
+local function stockUp()
+	local function emptyInv()
+		print("Dropping off items")
+		travel(config.get("dropoff"))
+		config.set("state", "stockUp")
+		miner.tossJunk("down")
+		miner.dropoff()
+	end
+	local turtleNeedsFuel, amountNeeded = needFuel()
+	if turtleNeedsFuel then
+		if not go.canReach(config.get("dropoff")) then
+			print("Please add fuel!")
+			while not go.canReach(config.get("dropoff")) do
+				os.pullEvent()
+				miner.refuel(go.fuelTo(config.get("dropoff")))
+			end
+		end
+		print("Getting more fuel")
+		local success, err = travel(config.get("dropoff"))
+		if not success then
+			print("Error going to drop off!")
+			travelDone()
+			error(err)
+		end
+		emptyInv()
+		while (turtle.getFuelLevel() < amountNeeded) do
+			turtle.suckUp(64)
+			miner.refuel(amountNeeded + config.get("fuelbuffer", 256 + config.get("width", 0) + config.get("height", 0)))
+		end
+		miner.dropoff()
+	elseif miner.freeSlots() < config.get("freeslots", 10) then
+		emptyInv()
+	end
+	config.set("state", "prep")
+end
+
+local function preperation()
+	if not config.get("shaft") then
+		-- get a shaft
+		print("Getting shaft info...")
+		local shaft, err = getShaft()
+		if shaft then
+			config.set("shaft", shaft)
+		else
+			if err == "no response" then
+				print("Server not responding. Retrying in 30 seconds.")
+				sleep(30)
+			elseif err == "no remaining shafts" then
+				print("All shafts mined.")
+				config.set("state", "done")
 			end
 		end
 	end
+	local shaft = config.get("shaft")
+	if shaft then
+		-- prepare to mine the shaft
+		print("Preparing to mine at " .. shaft.x .. ", " .. shaft.z)
+		config.set("state", "stockUp")
+		stockUp()
+		print("Going to shaft X: " .. shaft.x .. " Z: " .. shaft.z)
+		local pos = go.getPos()
+		local dPos = config.get("dropoff")
+		if pos.x == dPos.x and pos.z == dPos.z then
+			local success, err = go.goto(nil, nil, config.get("shaft_z_offset", 2))
+			if not success then
+				print("Error going to origin!")
+				error(err)
+			end
+			config.set("state", "prep")
+		end
+		local success, err = travel(shaft.x, 0, shaft.z)
+		travelDone() -- clear travel paths from server
+		if not success then
+			print("Error going to shaft!")
+			error(err)
+		end
+		config.set("state", "mining")
+	end
+end
+
+local function mining()
+	local miningPos = config.get("mining_pos", false)
+	local shaft = config.get("shaft")
+	if miningPos then
+		config.set("mining_pos", nil)
+		if miningPos.x == shaft.x and miningPos.z == shaft.z then
+			travel(miningPos.x, 0, miningPos.z)
+			go.goto(nil, miningPos.y, nil)
+		else
+			print("Paused position does not equal shaft position!!!")
+			print("Resetting...")
+			config.set("state", "prep")
+			return
+		end
+	end
+	local success, err = miner.mineShaft()
+	if not success then
+		if err == "inventory full" then
+			config.set("mining_pos", go.getPos())
+			config.set("state", "stockUp")
+			stockUp()
+			config.set("state", "mining")
+			return
+		end
+	end
+	while true do
+		local ok, err = markFinished(config.get("shaft"))
+		if not ok or err then
+			if err == "shaft not found" then
+				print("Shaft not found on server. Assuming it's finished!")
+				break
+			else
+				print("Error marking shaft as finished!")
+				print("Retrying in 30 seconds.")
+				sleep(30)
+			end
+		else
+			print("Marked shaft as finished!")
+			break
+		end
+	end
+	config.set("shaft", nil)
+	config.set("state","prep")
+end
+
+local function finish()
+	-- mining complete, clean up and uninstall
+	print("Quarry complete, dropping off items and uninstalling.")
+	travel(config.get("dropoff"))
+	travelDone()
+	miner.tossJunk("down")
+	miner.dropoff(true)
+	-- uninstall
+	fs.delete(".position")
+	fs.delete(".swarmconfig")
+	fs.delete("miner")
+	fs.delete("json")
+	fs.delete("relgo")
+	fs.delete("config")
+	fs.delete("startup")
+	fs.delete("swarm")
+	print("Uninstall completed.")
 end
 
 if config.get("host") and config.get("dropoff") and config.get("swarmname") then
@@ -129,109 +371,19 @@ if config.get("host") and config.get("dropoff") and config.get("swarmname") then
 	-- prep - preparing to mine new shaft
 	-- mining - currently mining a shaft(also needs coords)
 	-- done - mining is complete
-	--local ystart = config.get("y",64)
 	while true do
-		if config.get("state", "prep") == "prep" then
-			if not config.get("shaft") then
-				-- get a shaft
-				print("Getting shaft info...")
-				local shaft, err = getShaft(config.get("host"),config.get("swarmname"),config.get("authtoken"))
-				if shaft then
-					config.set("shaft", shaft)
-				else
-					if err == "no response" then
-						print("Server not responding. Retrying in 120 seconds.")
-						sleep(120)
-					elseif err == "no remaining shafts" then
-						print("All shafts mined.")
-						config.set("state","done")
-					end
-				end
-			end
-			if config.get("shaft") then
-				local shaft = config.get("shaft")
-
-				-- prepare to mine the shaft
-				print("Preparing to mine at "..shaft.x..", "..shaft.z)
-
-				-- check if turtle has enough fuel
-				local cpos = go.getPos()
-				local needed = config.get("fuelspare",25)
-				needed = needed + go.fuelTo(shaft.x, 64, shaft.z+2)
-				needed = needed + 70 * 2 -- for actual mining - assume 70 depth
-				needed = needed + go.fuelTo(config.get("dropoff"),{x=shaft.x,y=64,z=shaft.z+2})
-				miner.refuel(needed)
-				if turtle.getFuelLevel() < needed then
-					if not go.canReach(config.get("dropoff")) then
-						print("Please add fuel!")
-						while not go.canReach(config.get("dropoff")) do
-							os.pullEvent()
-							miner.refuel(go.fuelTo(config.get("dropoff")))
-						end
-					end
-					print("Getting more fuel")
-					go.goto(config.get("dropoff"))
-					miner.tossJunk("down")
-					dropoff()
-					while (turtle.getFuelLevel() <= needed) do
-						turtle.suckUp(64)
-						miner.refuel(needed + config.get("fuelbuffer",250))
-					end
-					dropoff()
-				end
-				local freeslots = 0
-				for i = 1, 16 do
-					if turtle.getItemCount(i) == 0 then
-						freeslots = freeslots + 1
-					end
-				end
-				if freeslots < config.get("freeslots",10) then
-					print("Dropping off items")
-					go.goto(config.get("dropoff"))
-					miner.tossJunk("down")
-					dropoff()
-				end
-				print("Going to shaft location")
-				local pos = go.getPos()
-				local dropoff = config.get("dropoff")
-				if pos.x == dropoff.x and pos.z == dropoff.z then
-					go.goto(nil,nil,pos.z+1) -- don't break fuel chest
-				end
-				go.goto(shaft.x,65,shaft.z+2) -- attempt to prevent turtles breaking eachother by having turtles use different Y levels
-				go.goto(nil,64,nil)
-				config.set("state","mining")
-			end
-		end
-		if config.get("state", "prep") == "mining" then
-			miner.mineShaft()
-			miner.tossJunk("down")
-			local ok, err = markFinished(config.get("shaft"), config.get("host"), config.get("swarmname"), config.get("authtoken"))
-			if not ok and err == "no response" then
-				while not ok and err == "no response" do
-					print("Server not responding. Retrying in 120 seconds.")
-					sleep(120)
-					ok, err = markFinished(config.get("shaft"), config.get("host"), config.get("swarmname"), config.get("authtoken"))
-				end
-			end
-			config.set("shaft",nil)
-			config.set("state","prep")
-		end
-		if config.get("state","prep") == "done" then
-			-- mining complete, clean up and uninstall
-			print("Quarry complete, dropping off items and uninstalling.")
-			go.goto(config.get("dropoff"))
-			miner.tossJunk("down")
-			dropoff(true)
-			-- uninstall
-			fs.delete(".position")
-			fs.delete(".swarmconfig")
-			fs.delete("miner")
-			fs.delete("json")
-			fs.delete("relgo")
-			fs.delete("config")
-			fs.delete("startup")
-			fs.delete("swarm")
-			print("Uninstall completed.")
+		local state = config.get("state", "prep")
+		travelDone() -- Just in case
+		if state == "prep" then
+			preperation()
+		elseif state == "traveling" then
+			travel()
+		elseif state == "stockUp" then
+			stockUp()
+		elseif state == "mining" then
+			mining()
+		elseif state == "done" then
+			finish()
 			break
 		end
 	end

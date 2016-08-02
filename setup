@@ -31,6 +31,10 @@ local blacklist = {
 	{name="Railcraft:cube",metadata=7}
 }
 
+local liquidfuels = {
+	lava = {name="minecraft:flowing_lava",metadata=0}
+}
+
 for i,v in ipairs(copyfiles) do
 	assert(fs.exists(".sq/"..v),"Missing required file: "..v.. " - please redownload the setup.")
 end
@@ -64,27 +68,49 @@ term.setCursorPos(1,1)
 print("Please enter the address of the host server below.")
 write("> ")
 local host = read()
-config.set("host",host)
+if not host:match("^http:\\/\\/") then host = "http://" .. host end
+config.set("host", host)
+if not http.get(host) then
+	print("Hmm, I can't reach the server.")
+	print("Are you sure you set it up correctly and it is running?")
+	error()
+end
+
 print("What should the name of the swarm be?")
 write("> ")
 local name = read()
-config.set("swarmname",name)
+config.set("swarmname", name)
 print("How wide should the quarry be, in blocks?")
 write("> ")
-local w = tonumber(read()) or 10
+local width = tonumber(read()) or 8
 print("How long should the quarry be, in blocks?")
 write("> ")
-local h = tonumber(read()) or 10
+local length = tonumber(read()) or 8
 print("How much extra fuel should turtles keep when getting fuel?")
-print("The higher the number, the more efficient the fuel usage, but higher fuel requirements. Defaults to 250.")
+print("The higher the number, the more efficient the fuel usage, but higher fuel requirements. Defaults to 256 + width + length.")
 write("> ")
-local fb = tonumber(read()) or 250
-config.set("fuelbuffer",fb)
-config.set("fuelspare",25)
-print("Contacting server...")
-local h = http.get(host .. "/swarm/" .. name .. "/create?w=" .. w .. "&h=" .. h)
-if h then
-	local response = json.decode(h.readAll())
+local fuelbuffer = tonumber(read()) or (256 + width + length)
+config.set("fuelbuffer", fuelbuffer)
+config.set("fuelspare", 25)
+print("Should the turtles attempt to refuel when they find lava?")
+print("Requires each to have an empty bucket.")
+write("[Y/N] > ")
+while true do
+	local _,key = os.pullEvent("char")
+	if key == "y" then
+		config.set("lavarefuel", true)
+		break
+	elseif key == "n" then
+		config.set("lavarefuel", false)
+		break
+	end
+end
+
+
+print("\nContacting server...")
+local handle = http.get(host .. "/swarm/" .. name .. "/create?width=" .. width .. "&length=" .. length)
+if handle then
+	local response = json.decode(handle.readAll())
 	if response.success then
 		print("Success!")
 		print(response.shafts .. " shafts will be mined.")
@@ -94,15 +120,19 @@ if h then
 			end
 			fs.copy(".sq/"..v,"disk/"..v)
 		end
-		config.set("dropoff",{x=0,y=64,z=-3,f=2})
+		config.set("width", width)
+		config.set("height", height)
+		config.set("dropoff",{x=0, y=0, z=-3, f=2})
 		config.set("block_blacklist",blacklist)
+		config.set("liquidfuels",liquidfuels)
 		config.set("autoname",true)
+		config.set("travelSleepTime",3)
+		config.set("shaft_z_offset", 2)
 		if fs.exists("disk/startup") then fs.delete("disk/startup") end
-		local f = fs.open("disk/startup","w")
+		local f = fs.open("disk/startup", "w")
 		f.write(deploy_code)
 		f.close()
-		print("Setup complete!")
-		print("Please follow the instructions in the forum thread to deploy miners using the disk.")
+		print("Setup complete! Ready to deploy miners!")
 	else
 		print("Oh no!")
 		print("An error occurred!")
