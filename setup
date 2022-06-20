@@ -36,7 +36,7 @@ local liquidfuels = {
 }
 
 for i,v in ipairs(copyfiles) do
-	assert(fs.exists(".sq/"..v),"Missing required file: "..v.. " - please redownload the setup.")
+	assert(fs.exists("nodequarry/"..v),"Missing required file: "..v.. " - please redownload the setup.")
 end
 
 local deploy_code = [[
@@ -118,7 +118,7 @@ if handle then
 			if fs.exists("disk/"..v) then
 				fs.delete("disk/"..v)
 			end
-			fs.copy(".sq/"..v,"disk/"..v)
+			fs.copy("nodequarry/"..v,"disk/"..v)
 		end
 		config.set("width", width)
 		config.set("height", height)
