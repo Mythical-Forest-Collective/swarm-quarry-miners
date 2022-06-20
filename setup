@@ -59,8 +59,8 @@ if key == "y" then
 end
 ]]
 
-os.loadAPI(".sq/config")
-os.loadAPI(".sq/json")
+os.loadAPI("nodequarry/config")
+os.loadAPI("nodequarry/json")
 if fs.exists("disk/.swarmconfig") then fs.delete("disk/.swarmconfig") end
 config.init("disk/.swarmconfig")
 term.clear()
